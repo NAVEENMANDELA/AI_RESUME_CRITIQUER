@@ -5,3 +5,5 @@ pandas
 numpy
 openai
 PyPDF2
+google-generativeai
+python-3.11
