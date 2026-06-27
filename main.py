@@ -17,10 +17,10 @@ st.markdown(
     "to improve clarity, ATS score, and job impact."
 )
 
-# Prefer Streamlit Cloud secrets; fallback to local .env
+# Prefer Streamlit secrets in deployment; fallback to local .env
 GEMINI_API_KEY = st.secrets.get("GEMINI_API_KEY") or os.getenv("GEMINI_API_KEY")
 if not GEMINI_API_KEY:
-    st.error("GEMINI_API_KEY not found. Set it in Streamlit Secrets or local .env")
+    st.error("Configuration missing. Please set GEMINI_API_KEY in Streamlit Secrets.")
     st.stop()
 
 genai.configure(api_key=GEMINI_API_KEY)
@@ -44,12 +44,10 @@ def extract_text_from_file(file_obj):
     return file_obj.read().decode("utf-8", errors="ignore")
 
 def get_models():
-    # Put most available/cheaper-first model first.
-    # Keep multiple fallbacks in case one is unavailable for your key/project.
+    # Keep only likely-available models for your setup
     return [
         "gemini-2.5-flash",
         "gemini-2.5-pro",
-        "gemini-1.5-flash",
     ]
 
 def build_prompt(resume_text: str, target_role: str) -> str:
@@ -109,24 +107,23 @@ Rules:
 - Keep tone honest, constructive, and encouraging.
 """.strip()
 
+def is_rate_limit_error(err: Exception) -> bool:
+    msg = str(err).lower()
+    return ("429" in msg) or ("quota" in msg) or ("rate limit" in msg) or ("resource_exhausted" in msg)
+
 def generate_with_backoff(model, prompt, max_retries=4):
-    """Retry only for transient/rate-limit errors."""
     last_err = None
     for attempt in range(max_retries):
         try:
             return model.generate_content(prompt)
         except Exception as e:
             last_err = e
-            msg = str(e).lower()
-            # Retry on quota/rate-limit/transient server errors
-            if "429" in msg or "quota" in msg or "rate limit" in msg or "503" in msg:
-                wait_s = min(45, (2 ** attempt) + random.uniform(0.5, 1.5))
-                st.info(f"Rate limit hit. Retrying in {wait_s:.1f}s...")
-                time.sleep(wait_s)
+            if is_rate_limit_error(e):
+                wait_s = min(20, (2 ** attempt) + random.uniform(0.3, 1.0))
+                time.sleep(wait_s)  # silent retry
                 continue
-            # Non-retryable errors
             raise
-    raise RuntimeError(f"Rate-limited after retries. Last error: {last_err}")
+    raise last_err if last_err else RuntimeError("Generation failed")
 
 if analyze:
     if not uploaded_file:
@@ -149,28 +146,27 @@ if analyze:
 
         response = None
         used_model = None
-        errors = []
 
         with st.spinner("Analyzing resume... this may take 10-30 seconds"):
             for model_name in get_models():
                 try:
                     model = genai.GenerativeModel(model_name)
                     candidate = generate_with_backoff(model, prompt)
-                    text = getattr(candidate, "text", None)
-                    if text and text.strip():
+                    if getattr(candidate, "text", None) and candidate.text.strip():
                         response = candidate
                         used_model = model_name
                         break
-                    errors.append(f"{model_name}: empty response")
-                except Exception as e:
-                    errors.append(f"{model_name}: {e}")
+                except Exception:
+                    # Try next model silently
+                    continue
 
         if response is None:
-            raise RuntimeError("All models failed:\n- " + "\n- ".join(errors))
+            st.error("Service is temporarily busy. Please try again in a minute.")
+            st.stop()
 
         st.success(f"Analysis complete using {used_model}")
         st.markdown("### Analysis Results")
         st.markdown(response.text)
 
-    except Exception as e:
-        st.error(f"An error occurred: {e}")
+    except Exception:
+        st.error("Something went wrong while analyzing the resume. Please try again.")
