@@ -43,7 +43,8 @@ def extract_text_from_file(file_obj):
 def get_models():
     return [
         "gemini-3.5-flash",
-  
+        "gemini-2.0-flash",
+        "gemini-1.5-pro",  
     ]
 
 def build_prompt(resume_text: str, target_role: str) -> str:
