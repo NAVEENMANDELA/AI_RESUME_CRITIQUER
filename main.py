@@ -164,7 +164,7 @@ if analyze:
             st.error("Service is temporarily busy. Please try again in a minute.")
             st.stop()
 
-        st.success(f"Analysis complete using {used_model}")
+
         st.markdown("### Analysis Results")
         st.markdown(response.text)
 
