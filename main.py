@@ -1,5 +1,7 @@
 import io
 import os
+import time
+import random
 
 import PyPDF2
 import streamlit as st
@@ -15,9 +17,10 @@ st.markdown(
     "to improve clarity, ATS score, and job impact."
 )
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+# Prefer Streamlit Cloud secrets; fallback to local .env
+GEMINI_API_KEY = st.secrets.get("GEMINI_API_KEY") or os.getenv("GEMINI_API_KEY")
 if not GEMINI_API_KEY:
-    st.error("GEMINI_API_KEY not found in .env file")
+    st.error("GEMINI_API_KEY not found. Set it in Streamlit Secrets or local .env")
     st.stop()
 
 genai.configure(api_key=GEMINI_API_KEY)
@@ -41,10 +44,12 @@ def extract_text_from_file(file_obj):
     return file_obj.read().decode("utf-8", errors="ignore")
 
 def get_models():
+    # Put most available/cheaper-first model first.
+    # Keep multiple fallbacks in case one is unavailable for your key/project.
     return [
-        "gemini-1.5-pro",
-        "gemini-2.0-flash",
-        "gemini-3.5-flash",  
+        "gemini-2.5-flash",
+        "gemini-2.5-pro",
+        "gemini-1.5-flash",
     ]
 
 def build_prompt(resume_text: str, target_role: str) -> str:
@@ -104,6 +109,25 @@ Rules:
 - Keep tone honest, constructive, and encouraging.
 """.strip()
 
+def generate_with_backoff(model, prompt, max_retries=4):
+    """Retry only for transient/rate-limit errors."""
+    last_err = None
+    for attempt in range(max_retries):
+        try:
+            return model.generate_content(prompt)
+        except Exception as e:
+            last_err = e
+            msg = str(e).lower()
+            # Retry on quota/rate-limit/transient server errors
+            if "429" in msg or "quota" in msg or "rate limit" in msg or "503" in msg:
+                wait_s = min(45, (2 ** attempt) + random.uniform(0.5, 1.5))
+                st.info(f"Rate limit hit. Retrying in {wait_s:.1f}s...")
+                time.sleep(wait_s)
+                continue
+            # Non-retryable errors
+            raise
+    raise RuntimeError(f"Rate-limited after retries. Last error: {last_err}")
+
 if analyze:
     if not uploaded_file:
         st.warning("Please upload your resume first.")
@@ -112,7 +136,7 @@ if analyze:
     try:
         resume_text = extract_text_from_file(uploaded_file)
 
-        if not resume_text.strip():
+        if not resume_text or not resume_text.strip():
             st.error("No readable content found in the uploaded file.")
             st.stop()
 
@@ -125,24 +149,28 @@ if analyze:
 
         response = None
         used_model = None
-        last_error = None
+        errors = []
 
         with st.spinner("Analyzing resume... this may take 10-30 seconds"):
             for model_name in get_models():
                 try:
                     model = genai.GenerativeModel(model_name)
-                    response = model.generate_content(prompt)
-                    used_model = model_name
-                    break
+                    candidate = generate_with_backoff(model, prompt)
+                    text = getattr(candidate, "text", None)
+                    if text and text.strip():
+                        response = candidate
+                        used_model = model_name
+                        break
+                    errors.append(f"{model_name}: empty response")
                 except Exception as e:
-                    last_error = e
+                    errors.append(f"{model_name}: {e}")
 
         if response is None:
-            raise RuntimeError(f"All models failed. Last error: {last_error}")
+            raise RuntimeError("All models failed:\n- " + "\n- ".join(errors))
 
         st.success(f"Analysis complete using {used_model}")
         st.markdown("### Analysis Results")
         st.markdown(response.text)
 
     except Exception as e:
-        st.error(f"An error occurred: {str(e)}")
+        st.error(f"An error occurred: {e}")
